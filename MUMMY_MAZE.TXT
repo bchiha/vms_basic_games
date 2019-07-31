@@ -1,0 +1,1095 @@
+#----------------------------
+#    M U M M Y   M A Z E 
+#----------------------------
+#.m
+!*******************************************************************************
+ Image maze, facility=mummy, short_name=mm
+!-----------------------------------------
+%ab 
+    The Mummy Maze, Based on the Java Maze Program
+    (c) 2002 B. Chiha
+%end %ab
+%keywords mummy,maze,game
+
+Interface
+
+CLD_syntax
+    define verb mm
+    image "genbld:mummy_maze.exe"
+end CLD_syntax
+
+end interface
+Implementation
+
+Shared
+
+%include 'utebld:smg_stuff.bas'
+
+Record screen_ids
+    Long pboard    ! Pasteboard
+    Long main      ! Main Screen
+    Long score     ! Score Screen
+    Long title     ! Title Screen
+    Long help      ! Help Screen
+    Long msg       ! Message Bar
+    Long Kboard    ! Keyboard
+End Record
+
+declare long Constant   max_map_x = 20, max_map_y = 20
+
+!renditions are:
+!SMG$M_BOLD = 1
+!SMG$M_REVERSE = 2
+!SMG$M_BLINK = 4
+!SMG$M_UNDERLINE = 8
+!SMG$M_INVISIBLE = 16
+!SMG$M_USER1 = 256
+!SMG$M_USER2 = 512
+!SMG$M_USER3 = 1024
+!SMG$M_USER4 = 2048
+!SMG$M_USER5 = 4096
+!SMG$M_USER6 = 8192
+!SMG$M_USER7 = 16384
+!SMG$M_USER8 = 32768
+
+enum_type character
+    attributes
+         string char = 1   !character symbol
+         long rend         !rendition for screen
+         byte align        !true=bad or false=good
+         byte first_move   !true=horizontal or false=vertical
+    end attributes
+        man ("@", 1, 0, 0)
+        mummy1 ("&", 2048, -1, -1)
+        mummy2 ("&", 2048, -1, -1)
+        mummy3 ("&", 8192, -1, 0)
+        exit (" ", 0, 0, 0)
+        trap ("T", 512, 0, 0)
+        key ("p", 32768, 0, 0)
+        door ("+", 0, 0, 0)
+end enum_type
+
+Record map_data
+    String grid(1 to max_map_x,1 to max_map_y) = 1
+    long posx(mummy_character_man to mummy_character_door) 
+    long posy(mummy_character_man to mummy_character_door)
+End record
+
+!Record to save moves and used if undo move is needed
+Record move_char
+    long posx(mummy_character_man to mummy_character_mummy3) 
+    long posy(mummy_character_man to mummy_character_mummy3)
+End Record
+    
+declare word constant max_stored_moves = 1023
+Record move_registar
+    word move_number
+    move_char moves(0 to max_stored_moves)
+End Record
+
+!Screen Titles
+declare string Constant game_title = "MUMMY MAZE", &
+                        main_win = "Game", &
+                        help_win = "Mummy Maze Help", &
+                        score_win = "Score"
+
+!Special Characters
+declare string Constant blank_char = ' '
+
+!Global Variables -- Yuk
+map (mm_data) screen_ids scrn, quad initial_time, map_data current_map, &
+              move_registar moves_made, long init_door_x, init_door_y
+
+End Shared
+!_______________________________________________________________________________
+Program mummy_maze
+option constant type=Integer, handle=severe
+
+declare word key_hit, long current_level 
+
+! Create Pasteboard and virtual displays
+! --------------------------------------
+call mm.init_screen
+
+! Create and Show initial map
+! ---------------------------
+current_level = 5
+call mm.load_map(current_level)
+call mm.clear_move
+
+! Start the Clock off
+! -------------------
+external long mm.calc_time
+call sys$gettim(initial_time)
+call sys$dclast(mm.calc_time,,)
+
+! Create a keyboard and wait for a key to be pressed.  End Game if needed
+! Also handle the Delete key which undo's a move
+! -----------------------------------------------------------------------
+call smg$create_virtual_keyboard(scrn::kboard, "sys$input:")
+
+while key_hit <> SMG$K_TRM_UPPERCASE_Q and key_hit <> SMG$K_TRM_LOWERCASE_Q
+    call smg$read_keystroke(scrn::kboard, key_hit,,,)       
+    if key_hit = SMG$K_TRM_DELETE then
+        call mm.undo_move
+    else
+        call mm.move(key_hit)
+        call mm.store_move
+        call mm.check_game_status(current_level)
+    end if
+next
+
+! Remove Virtual Displays and delete it
+! -------------------------------------
+call mm.kill_screen
+call mm.display_credit 
+end program
+
+!_______________________________________________________________________________
+Sub mm.move(word key_hit)
+option constant type=Integer
+
+! Analyse key hit and do the resultant request
+!
+! Movement Notes:
+! Man can move left, right, up, down, or wait
+! Mummy's will take two moves for every man move
+!
+!-----------------------------------------------------------------------------
+
+external long function mm.check_square(character., long, long)
+
+select key_hit
+  case SMG$K_TRM_LEFT, SMG$K_TRM_KP4
+      if mm.check_square(character.man, -1, 0) then
+          call mm.remove_char(character.man)
+          current_map::posx(character.n(character.man)) = &
+              current_map::posx(character.n(character.man)) - 1
+          call mm.redraw_fixed_items
+          call mm.display_char(character.man)
+          call mm.move_mummy
+      end if
+  case SMG$K_TRM_RIGHT, SMG$K_TRM_KP6
+      if mm.check_square(character.man, 1, 0) then
+          call mm.remove_char(character.man)
+          current_map::posx(character.n(character.man)) = &
+              current_map::posx(character.n(character.man)) + 1
+          call mm.redraw_fixed_items
+          call mm.display_char(character.man)
+          call mm.move_mummy
+      end if
+  case SMG$K_TRM_UP, SMG$K_TRM_KP8
+      if mm.check_square(character.man, 0, -1) then
+          call mm.remove_char(character.man)
+          current_map::posy(character.n(character.man)) = &
+              current_map::posy(character.n(character.man)) - 1
+          call mm.redraw_fixed_items
+          call mm.display_char(character.man)
+          call mm.move_mummy
+      end if
+  case SMG$K_TRM_DOWN, SMG$K_TRM_KP2
+      if mm.check_square(character.man, 0, 1) then
+          call mm.remove_char(character.man)
+          current_map::posy(character.n(character.man)) = &
+              current_map::posy(character.n(character.man)) + 1
+          call mm.redraw_fixed_items
+          call mm.display_char(character.man)
+          call mm.move_mummy
+      end if
+  case SMG$K_TRM_KP5, SMG$K_TRM_LOWERCASE_P
+      call mm.move_mummy
+  case SMG$K_TRM_LOWERCASE_H, SMG$K_TRM_UPPERCASE_H
+      call mm.help
+  case SMG$K_TRM_CTRLW
+      call smg$repaint_screen(scrn::pboard)
+end select
+
+End Sub
+!_______________________________________________________________________________
+Sub mm.move_mummy
+option constant type=Integer
+
+!  Move the Mummy(s) which are currently on the map
+!
+!  First check if Mummy moves horizontal or vertical first then
+!  move the Mummy in the preferred direction if needed or posible.
+!  Do this for max_moves.  The routine will handle multiple Mummys at a time
+!
+!-------------------------------------------------------------------------------
+external long function mm.check_square(character., long, long)
+declare long constant max_moves = 2
+declare long mummy, moves, go_x, go_y
+
+call smg$begin_display_update(scrn::main)
+
+for mummy = 1 to character.nvals
+    if character.align(character.fr_n(mummy)) and &
+       current_map::posx(mummy) <> 0 and current_map::posy(mummy) <> 0 
+    then
+        for moves = 1 to max_moves
+            go_x = sgn(current_map::posx(character.n(character.man)) - &
+                       current_map::posx(mummy))
+            go_y = sgn(current_map::posy(character.n(character.man)) - &
+                       current_map::posy(mummy))
+            if character.first_move(character.fr_n(mummy)) !Horizontal First
+            then
+                if mm.check_square(character.fr_n(mummy), go_x, 0) and go_x
+                then
+                    call mm.remove_char(character.fr_n(mummy))
+                    current_map::posx(mummy) = current_map::posx(mummy) + go_x
+                    call mm.redraw_fixed_items
+                    call mm.display_char(character.fr_n(mummy))
+                else
+                    if mm.check_square(character.fr_n(mummy), 0, go_y) and go_y
+                    then
+                       call mm.remove_char(character.fr_n(mummy))
+                       current_map::posy(mummy) = current_map::posy(mummy) +go_y
+                       call mm.redraw_fixed_items
+                       call mm.display_char(character.fr_n(mummy))
+                    end if 
+                 end if  
+            else                                          !Vertical First
+                if mm.check_square(character.fr_n(mummy), 0, go_y) and go_y
+                then
+                    call mm.remove_char(character.fr_n(mummy))
+                    current_map::posy(mummy) = current_map::posy(mummy) + go_y
+                    call mm.redraw_fixed_items
+                    call mm.display_char(character.fr_n(mummy))
+                else
+                    if mm.check_square(character.fr_n(mummy), go_x, 0) and go_x
+                    then
+                       call mm.remove_char(character.fr_n(mummy))
+                       current_map::posx(mummy) = current_map::posx(mummy) +go_x
+                       call mm.redraw_fixed_items
+                       call mm.display_char(character.fr_n(mummy))
+                    end if 
+                end if  
+            end if
+        next moves
+    end if
+next mummy
+
+call smg$end_display_update(scrn::main)
+
+End sub
+
+!_______________________________________________________________________________
+Sub mm.undo_move
+option constant type=Integer
+
+declare long i
+
+!Restore positions to previous for all moving objects.  Reprint fixed objects
+!if they have been walked over.
+
+if moves_made::move_number <> 0 then
+    moves_made::move_number = moves_made::move_number - 1
+    for i = character.n(character.man) to character.n(character.mummy3)
+        if moves_made::moves(moves_made::move_number)::posx(i) <> 0 and &
+           moves_made::moves(moves_made::move_number)::posy(i) <> 0 then
+            call mm.remove_char(character.fr_n(i))
+            current_map::posx(i) = &
+                moves_made::moves(moves_made::move_number)::posx(i)
+            current_map::posy(i) = &
+                moves_made::moves(moves_made::move_number)::posy(i)
+            call mm.redraw_fixed_items
+            call mm.display_char(character.fr_n(i))
+        end if
+    next i
+end if
+
+End Sub
+!_______________________________________________________________________________
+Sub mm.store_move
+option constant type=Integer
+
+declare long i
+
+!Save current positions of all moving objects
+
+if moves_made::move_number <= max_stored_moves then
+    moves_made::move_number = moves_made::move_number + 1
+    for i = character.n(character.man) to character.n(character.mummy3)
+        moves_made::moves(moves_made::move_number)::posx(i) = &
+            current_map::posx(i)
+        moves_made::moves(moves_made::move_number)::posy(i) = &
+            current_map::posy(i)
+    next i
+end if
+
+End Sub
+!_______________________________________________________________________________
+Sub mm.clear_move
+option constant type=Integer
+
+! Reset moves tables (usually at start of new game or level)
+declare long i
+
+moves_made::move_number = 0
+for i = character.n(character.man) to character.n(character.mummy3)
+    moves_made::moves(moves_made::move_number)::posx(i) = current_map::posx(i)
+    moves_made::moves(moves_made::move_number)::posy(i) = current_map::posy(i)
+next i
+
+End Sub
+!_______________________________________________________________________________
+Sub mm.redraw_fixed_items
+option constant type=Integer
+
+! Redraw all the fixed items that are on the map.  This routine is needed if
+! An object IE: Trap is walked over and needs to be redrawn
+
+declare long i
+
+for i = character.n(character.trap) to character.n(character.door)
+    if current_map::posx(i) <> 0 and current_map::posy(i) <> 0 
+    then
+        call mm.display_char(character.fr_n(i))
+    end if
+next i
+
+End Sub
+!_______________________________________________________________________________
+function byte mm.check_square(character. char, long x, y)
+option constant type=Integer
+
+!Check that square can be walked on.  IE not a WALL!
+
+declare byte constant bas_c_true = -1
+declare byte constant bas_c_false = 0
+
+select current_map::grid(current_map::posx(character.n(char)) + x,  &
+                         current_map::posy(character.n(char)) + y)
+    case blank_char
+        mm.check_square = bas_c_true
+    case else
+        mm.check_square = bas_c_false
+end select
+
+!Check that door is open before walking into it
+if (current_map::posx(character.n(character.door)) <> 0 and &
+    current_map::posy(character.n(character.door)) <> 0) 
+then
+    mm.check_square = bas_c_false if &
+        current_map::posx(character.n(character.door)) = &
+        current_map::posx(character.n(char)) + x and &
+        current_map::posy(character.n(character.door)) = &
+        current_map::posy(character.n(char)) + y
+end if
+
+End function 
+!_______________________________________________________________________________
+Sub mm.check_game_status(long current_level)
+option constant type=Integer
+
+!Check on the current player positions and handle scenario (in order) if needed
+
+!Scenario 1.  Kill off one Mummy if Mummy's walk into eachother
+!Scenario 2.  Make the Man Fall if he has walked onto a trap
+!Scenario 3.  Find out if Man's position is the same as a Mummy's
+!Scenario 4.  If Man is near the exit, then Move man to the next level
+
+!Future Scenario ... If Man or Mummy walks on key then open secret door
+
+declare byte constant bas_c_true = -1, bas_c_false = 0
+declare long constant bottom_level = 1
+declare byte escape, door_blocked, &
+        word key_hit, &
+        long person, person2, mummy1, mummy2, i, &
+        string msg
+
+!Check of Mummys that have hit each other
+!----------------------------------------
+for mummy1 = 1 to character.nvals
+    if character.align(character.fr_n(mummy1)) and &
+       current_map::posx(mummy1) <> 0 and current_map::posy(mummy1) <> 0 
+    then
+        for mummy2 = 1 to character.nvals
+            if character.align(character.fr_n(mummy2)) and &
+                mummy1 <> mummy2 and &
+                current_map::posx(mummy1) = current_map::posx(mummy2) and &
+                current_map::posy(mummy1) = current_map::posy(mummy2)
+            then
+                for i = 1 to 100
+                    call mm.display_char(character.fr_n(mummy2))
+                    call mm.display_char(character.fr_n(mummy1))
+                next i
+                current_map::posx(mummy2) = 0
+                current_map::posy(mummy2) = 0
+                call smg$put_chars(scrn::msg, "Arrgg - The Mummy's Fight for" &
+                                   + " position, only one Mummy survived",&
+                                   1,1, smg$m_erase_to_eol,)
+            end if
+        next mummy2
+    end if
+next mummy1 
+
+!Check if Man or Mummy has walked on a key
+!Assume that if door exist so does key and door is currently closed
+!------------------------------------------------------------------
+if current_map::posx(character.n(character.key)) <> 0 and &
+   current_map::posy(character.n(character.key)) <> 0 
+then
+   door_blocked = bas_c_false
+   for person = 1 to character.nvals
+       if (character.align(character.fr_n(person)) or &
+           character.n(character.man) = person) and &
+          current_map::posx(person) <> 0 and current_map::posy(person) <> 0 
+       then
+           if current_map::posx(character.n(character.key)) = &
+              current_map::posx(person) and &
+              current_map::posy(character.n(character.key)) = &
+              current_map::posy(person)
+           then
+               for person2 = 1 to character.nvals
+                   if ((character.align(character.fr_n(person2)) or &
+                       character.n(character.man) = person2)) and &
+                      current_map::posx(person2) = init_door_x and &
+                      current_map::posy(person2) = init_door_y 
+                   then
+                       call smg$put_chars(scrn::msg, "Can't operate door!," &
+                               + " someone or something is on the way!", 1,1, &
+                               smg$m_erase_to_eol,)
+                       door_blocked = bas_c_true
+                   end if
+               next person2
+               if current_map::posx(character.n(character.door)) <> 0 and &
+                  current_map::posy(character.n(character.door)) <> 0
+               then
+                   call smg$put_chars(scrn::msg, "A Secret Door has just" &
+                               + " opened!", 1,1, smg$m_erase_to_eol,)
+                   call smg$put_chars(scrn::main, " ", init_door_y, &
+                                      init_door_x,,,)
+                   current_map::posx(character.n(character.door)) = 0 
+                   current_map::posy(character.n(character.door)) = 0 
+                   call mm.redraw_fixed_items
+                   call mm.display_char(character.fr_n(person))
+               else
+                   if not door_blocked 
+                   then 
+                       call smg$put_chars(scrn::msg, "A Secret Door has" &
+                                   + " closed!", 1,1, smg$m_erase_to_eol,)
+                       current_map::posx(character.n(character.door)) = &
+                                                                     init_door_x
+                       current_map::posy(character.n(character.door)) = &
+                                                                     init_door_y
+                       call mm.redraw_fixed_items
+                       call mm.display_char(character.fr_n(person))
+                   end if
+               end if
+           end if
+       end if 
+    next person
+end if
+
+!Check if Man is on a trap
+!-------------------------
+if current_map::posx(character.n(character.trap)) <> 0 and &
+   current_map::posy(character.n(character.trap)) <> 0 
+then
+    if current_map::posx(character.n(character.trap)) = &
+           current_map::posx(character.n(character.man)) and &
+           current_map::posy(character.n(character.trap)) = &
+           current_map::posy(character.n(character.man))
+    then
+        call smg$put_chars(scrn::msg, "You fall down a trap" &
+                               + " door. Press any key" &
+                               + " to try again or Delete to undo move", &
+                               1,1, smg$m_erase_to_eol,)
+        call smg$read_keystroke(scrn::kboard, key_hit,,,)
+        if key_hit = SMG$K_TRM_DELETE then
+            call mm.redraw_fixed_items
+            call mm.undo_move
+            call smg$put_chars(scrn::msg, "", 1,1, smg$m_erase_to_eol,)
+        else
+            call mm.load_map(current_level)
+            call mm.clear_move
+        end if
+        exit sub
+    end if
+end if
+
+!Check that Man has been caught
+!------------------------------
+for mummy1 = 1 to character.nvals
+    if character.align(character.fr_n(mummy1)) and &
+       current_map::posx(mummy1) <> 0 and current_map::posy(mummy1) <> 0 
+    then
+        if current_map::posx(mummy1) = &
+           current_map::posx(character.n(character.man)) and &
+           current_map::posy(mummy1) = &
+           current_map::posy(character.n(character.man))
+        then
+            call smg$put_chars(scrn::msg, "Caught - Game over! Press any key" &
+                               + " to try again or Delete to undo move", &
+                               1,1, smg$m_erase_to_eol,)
+            call smg$read_keystroke(scrn::kboard, key_hit,,,)
+            if key_hit = SMG$K_TRM_DELETE then
+                call mm.undo_move
+                call smg$put_chars(scrn::msg, "", 1,1, smg$m_erase_to_eol,)
+            else
+                call mm.load_map(current_level)
+                call mm.clear_move
+            end if
+            exit sub
+        end if
+    end if
+next mummy1
+
+!Check the Man is next to exit
+!-----------------------------
+if current_map::posx(character.n(character.man)) + 1 = &
+   current_map::posx(character.n(character.exit)) and &
+   current_map::posy(character.n(character.man)) = &
+   current_map::posy(character.n(character.exit))
+then
+    call mm.remove_char(character.man)
+    current_map::posx(character.n(character.man)) = &
+        current_map::posx(character.n(character.man)) + 1
+    call mm.display_char(character.man)
+    escape = bas_c_true
+end if
+if current_map::posx(character.n(character.man)) - 1 = &
+   current_map::posx(character.n(character.exit)) and &
+   current_map::posy(character.n(character.man)) = &
+   current_map::posy(character.n(character.exit))
+then
+    call mm.remove_char(character.man)
+    current_map::posx(character.n(character.man)) = &
+        current_map::posx(character.n(character.man)) - 1
+    call mm.display_char(character.man)
+    escape = bas_c_true
+end if
+if current_map::posx(character.n(character.man)) = &
+   current_map::posx(character.n(character.exit)) and &
+   current_map::posy(character.n(character.man)) + 1 = &
+   current_map::posy(character.n(character.exit))
+then
+    call mm.remove_char(character.man)
+    current_map::posy(character.n(character.man)) = &
+        current_map::posy(character.n(character.man)) + 1
+    call mm.display_char(character.man)
+    escape = bas_c_true
+end if
+if current_map::posx(character.n(character.man)) = &
+   current_map::posx(character.n(character.exit)) and &
+   current_map::posy(character.n(character.man)) - 1 = &
+   current_map::posy(character.n(character.exit))
+then
+    call mm.remove_char(character.man)
+    current_map::posy(character.n(character.man)) = &
+        current_map::posy(character.n(character.man)) - 1
+    call mm.display_char(character.man)
+    escape = bas_c_true
+end if
+
+if escape then
+    if current_level = bottom_level then
+        call smg$put_chars(scrn::msg, "Escape!! You have left the building," + &
+                           " Press any key to try to escape again", &
+                           1,1, smg$m_erase_to_eol,)
+        call smg$read_keystroke(scrn::kboard, key_hit,,,)
+        call smg$put_chars(scrn::score, "5 k",3,2,,,,SMG$C_SPEC_GRAPHICS)
+        call smg$put_chars(scrn::score, "m 4 k",4,4,,,,SMG$C_SPEC_GRAPHICS)
+        call smg$put_chars(scrn::score, "m 3 k",5,8,,,,SMG$C_SPEC_GRAPHICS)
+        call smg$put_chars(scrn::score, "m 2 k",6,12,,,,SMG$C_SPEC_GRAPHICS)
+        call smg$put_chars(scrn::score, "m 1",7,16,,,,SMG$C_SPEC_GRAPHICS)
+        current_level = 5
+        call mm.load_map(current_level)
+    else
+        call smg$put_chars(scrn::msg, "Level " + str$(current_level) + &
+                           " complete, Press any key to proceed to the next" + &
+                           " level", 1,1, smg$m_erase_to_eol,)
+        call smg$read_keystroke(scrn::kboard, key_hit,,,)
+        current_level = current_level - 1
+        call mm.load_map(current_level)
+    end if
+    call mm.clear_move
+end if
+
+End sub
+!_______________________________________________________________________________
+Sub mm.display_char(character. char)
+option constant type=Integer
+
+!Print Character at the current x,y coordinates on the map
+!---------------------------------------------------------
+call smg$put_chars(scrn::main, character.char(char), &
+                   current_map::posy(character.n(char)), &
+                   current_map::posx(character.n(char)),, &
+                   character.rend(char))
+
+End sub
+!_______________________________________________________________________________
+Sub mm.remove_char(character. char)
+option constant type=Integer
+
+!Remove Character at the current x,y coordinates on the map
+!----------------------------------------------------------
+call smg$put_chars(scrn::main, blank_char, &
+                   current_map::posy(character.n(char)), &
+                   current_map::posx(character.n(char)))
+
+End sub
+!_______________________________________________________________________________
+Sub mm.update_score
+option constant type=Integer
+
+!Put the current score and values to the screen
+!----------------------------------------------
+!call smg$put_chars(scrn::score, format$(score,'<%>#####'), 2, 2)
+!call smg$put_chars(scrn::score, format$(level,'<%>#####'), 5, 2)
+
+End sub
+!_______________________________________________________________________________
+Sub mm.help
+option constant type=Integer
+
+! Acivate Help Screen
+!--------------------
+declare word key_hit
+call smg$paste_virtual_display(scrn::help, scrn::pboard, 5, 10)
+call smg$read_keystroke(scrn::kboard, key_hit,,,)   
+call smg$unpaste_virtual_display(scrn::help, scrn::pboard)   
+End Sub
+!_______________________________________________________________________________
+Sub mm.calc_time(long para1,R0,R1,PC,PSL)
+option constant type=Integer, type=Integer
+
+!Asynchronous routine executed every second to display timer
+!-----------------------------------------------------------
+external long mm.calc_time
+declare quad current_time, daytim, string diff_time
+
+call sys$gettim(current_time)
+diff_time = space$(23)
+call sys$asctim(, diff_time, current_time-initial_time,) 
+call smg$put_chars(scrn::score, seg$(diff_time,16,20), 9, 8)
+diff_time = "0 ::01.00"                     !redo every second
+call SYS$BINTIM(diff_time, daytim)
+call SYS$SETIMR(,daytim, mm.calc_time,0,0)  !resubmit module
+
+End sub
+!_______________________________________________________________________________
+Sub mm.display_credit
+option constant type=Integer, handle=severe
+
+! Display closing message when quitting
+!--------------------------------------
+
+external Long function ots$cvt_tz_l(String !hex_str!, Long !val!, &
+    Long by value !val_size!)
+declare long z,bina,i
+declare string hex
+
+data "16","00","09","09","09","09","09","42","72","6F","75","67","68","74","20","74"
+data "6F","20","79","6F","75","20","62","79","0D","0A","09","09","09","09","09","53"
+data "4C","41","52","54","49","42","41","52","54","46","41","53","54","20","49","4E"
+data "43","2E","0D","0A","0D","0A","20","5F","5F","5F","5F","20","20","20","20","20"
+data "20","20","20","20","20","20","20","20","5F","5F","5F","5F","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","20","20","20","7C","2B","2B","2B"
+data "2B","2B","7C","0D","0A","00","7C","2B","2B","2B","2B","7C","20","20","20","20"
+data "5F","5F","5F","20","20","20","20","7C","2B","2B","2B","2B","7C","20","20","20"
+data "20","20","20","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "20","20","20","20","5F","5F","5F","5F","20","20","20","20","7C","2B","2B","2B"
+data "2B","2B","7C","0D","0A","00","7C","2B","2B","2B","2B","7C","20","20","20","7C"
+data "2B","2B","20","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F"
+data "5F","5F","5F","5F","5F","5F","5F","5F","5F","20","20","20","20","20","20","20"
+data "20","20","20","7C","2B","2B","2B","2B","7C","20","20","20","7C","2B","2B","2B"
+data "2B","2B","7C","0D","0A","00","7C","2B","2B","2B","2B","7C","20","20","20","7C"
+data "2B","2B","2F","20","20","20","20","20","20","2F","28","20","29","5C","20","20"
+data "20","20","20","20","20","20","20","20","20","5C","20","20","20","20","20","20"
+data "20","20","20","7C","2B","2B","2B","2B","7C","20","20","20","7C","2B","2B","2B"
+data "2B","2B","7C","20","20","20","5F","5F","0D","0A","7C","20","20","20","20","7C"
+data "20","20","20","7C","2B","7C","20","20","20","20","20","20","7C","2D","6F","6F"
+data "20","2D","7C","20","20","20","20","20","20","20","20","20","20","20","5C","5F"
+data "5F","5F","5F","5F","5F","20","20","7C","2B","2B","2B","2B","7C","20","20","20"
+data "7C","2B","2B","2B","2B","2B","7C","20","20","7C","2B","2B","7C","0D","0A","00"
+data "2D","2D","2D","2D","2D","28","5F","5F","29","2D","2D","7C","20","20","20","20"
+data "20","20","20","5C","5F","5F","5C","2F","20","20","20","20","20","20","20","20"
+data "20","20","20","5F","28","5F","5F","29","5F","20","20","5C","20","2D","2D","2D"
+data "2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D"
+data "2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","0D"
+data "0A","00","20","6F","20","20","20","28","20","6F","6F","20","20","2F","5F","5F"
+data "5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F"
+data "5F","5F","5F","5F","5F","7C","28","6F","6F","29","20","20","5C","20","7C","20"
+data "20","20","20","20","20","20","20","20","5F","5F","0D","0A","20","7C","20","20"
+data "5F","2F","5C","5F","7C","20","7C","20","20","4D","20","4F","20","4F","20","2D"
+data "20","42","20","55","20","53","20","54","20","45","20","52","20","53","7C","5F"
+data "5F","5C","2F","5C","20","2F","7C","20","7C","20","20","20","20","20","20","20"
+data "20","2F","6F","6F","7C","20","2D","20","42","6C","65","61","75","72","67","68"
+data "21","0D","0A","00","20","7C","2D","7C","20","20","5C","5C","5F","5F","5F","5F"
+data "20","20","20","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","2D","2D","2D","2D","2D","2D","20"
+data "20","29","5F","20","20","20","20","2F","7C","20","20","2F","5C","0D","0A","00"
+data "20","20","2D","7C","5F","20","20","5C","5F","7C","2D","5F","7C","5E","5E","5E"
+data "5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E"
+data "5E","5E","5E","5E","5E","5E","5E","20","30","20","20","20","20","20","5F","7C"
+data "20","20","2A","20","20","5C","2F","20","20","2A","0D","0A","20","20","20","20"
+data "20","5C","20","20","7C","20","20","5F","5F","5F","5F","5F","5F","5F","5F","5F"
+data "5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F"
+data "5F","5F","5F","5F","5F","5F","5F","5F","5F","2F","0D","0A","20","20","20","20"
+data "20","7C","20","20","57","7C","20","20","5C","20","5C","5F","2F","20","2F","2D"
+data "2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D"
+data "20","5C","20","5C","5F","2F","20","2F","0D","0A","20","20","20","20","20","2F"
+data "20","2F","5C","20","5C","20","20","5C","5F","5F","5F","2F","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "5C","5F","5F","5F","2F","0D","0A","00","20","20","20","20","2F","20","2F","20"
+data "20","5C","20","5C","0D","0A","20","20","20","20","5E","5E","5E","20","20","20"
+data "5E","5E","5E","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","57","68","6F","20","79","6F","75"
+data "20","67","6F","6E","6E","61","20","63","61","6C","6C","2E","2E","2E","3F","00"
+
+for i = 1 to 16*59 
+    read hex
+    z = ots$cvt_tz_l(hex, bina, 4)
+    print string$(1,bina);
+next i
+
+End sub
+
+!_______________________________________________________________________________
+Sub mm.init_screen
+option constant type=Integer
+
+! Create and paste screens
+!------------------------- 
+declare Long rows, cols
+call smg$create_pasteboard(scrn::pboard,, rows, cols)
+call smg$create_virtual_display(1, cols, scrn::title)
+call smg$create_virtual_display(16,61, scrn::help, smg$m_block_border)
+call smg$label_border(scrn::help, help_win,,,smg$m_bold or smg$m_user5)
+call smg$create_virtual_display(20,20, scrn::main, smg$m_border)
+!call smg$label_border(scrn::main, main_win,,,smg$m_bold)
+call smg$create_virtual_display(20,19, scrn::score, smg$m_border)
+!call smg$label_border(scrn::score, score_win,,,smg$m_bold)
+call smg$create_virtual_display(1, cols, scrn::msg)
+call smg$paste_virtual_display(scrn::title, scrn::pboard, 1, 1)
+call smg$paste_virtual_display(scrn::main, scrn::pboard, 3, 21)
+call smg$paste_virtual_display(scrn::score, scrn::pboard, 3, cols-37)
+call smg$paste_virtual_display(scrn::msg, scrn::pboard, 24, 1)
+
+! Fill out screens with useful information
+!-----------------------------------------
+!call smg$put_chars_wide(scrn::title, game_title,1,cols/2 - len(game_title),  &
+!                                        SMG$M_BOLD or SMG$M_REVERSE)
+call smg$put_chars(scrn::score, "Level",2,8,,SMG$M_BOLD)
+call smg$put_chars(scrn::score, "5 k",3,2,,,,SMG$C_SPEC_GRAPHICS)
+call smg$put_chars(scrn::score, "m 4 k",4,4,,,,SMG$C_SPEC_GRAPHICS)
+call smg$put_chars(scrn::score, "m 3 k",5,8,,,,SMG$C_SPEC_GRAPHICS)
+call smg$put_chars(scrn::score, "m 2 k",6,12,,,,SMG$C_SPEC_GRAPHICS)
+call smg$put_chars(scrn::score, "m 1",7,16,,,,SMG$C_SPEC_GRAPHICS)
+call smg$put_chars(scrn::score, "Time",8,8,,SMG$M_BOLD)
+call smg$put_chars(scrn::score, "Keys",11,8,,SMG$M_BOLD)
+call smg$put_chars(scrn::score, "4 - Left",12,6)
+call smg$put_chars(scrn::score, "6 - Right",13,6)
+call smg$put_chars(scrn::score, "8 - Up",14,6)
+call smg$put_chars(scrn::score, "2 - Down",15,6)
+call smg$put_chars(scrn::score, "5 - Rest",16,6)
+call smg$put_chars(scrn::score, "or use arrow keys",17,2)
+call smg$put_chars(scrn::score, "H - Help Q - Quit",19,2)
+call smg$put_chars(scrn::score, "Del - Undo Move",20,3)
+call smg$put_chars(scrn::help, "The aim of the Game is escape from the maze without  ",2,5,,)
+call smg$put_chars(scrn::help, "getting caught by the evil Mummy.  You can move to an",3,5,,)
+call smg$put_chars(scrn::help, "adjacent square by using the number pad or arrow keys",4,5,,)
+call smg$put_chars(scrn::help, "making your way to the exit.  The Mummy moves two    ",5,5,,)
+call smg$put_chars(scrn::help, "squares for every one you do.  As you decend the maze",6,5,,)
+call smg$put_chars(scrn::help, "it gets harder.  The message bar at the bottom of the",7,5,,)
+call smg$put_chars(scrn::help, "screen will give you some useful information about   ",8,5,,)
+call smg$put_chars(scrn::help, "the current level. Some key maze features are below: ",9,5,,)
+call smg$put_chars(scrn::help, character.char(character.man),11,5,,           &
+                   character.rend(character.man),,)
+call smg$put_chars(scrn::help, "-- You",11,7,,,,)
+call smg$put_chars(scrn::help, "-- Maze Walls",11,42,,,,)
+call smg$put_chars(scrn::help, "lqqqk",11,36,,,,SMG$C_SPEC_GRAPHICS)
+call smg$put_chars(scrn::help, character.char(character.mummy1),12,5,,        &
+                   character.rend(character.mummy1),,)
+call smg$put_chars(scrn::help, "-- Mummy (Horizontal First)",12,7,,,,)
+call smg$put_chars(scrn::help, "xaaax",12,36,,,,SMG$C_SPEC_GRAPHICS)
+call smg$put_chars(scrn::help, character.char(character.mummy3),13,5,,        &
+                    character.rend(character.mummy3),,)
+call smg$put_chars(scrn::help, "-- Mummy (Vertical First)",13,7,,,,)
+call smg$put_chars(scrn::help, "xa ax",13,36,,,,SMG$C_SPEC_GRAPHICS)
+call smg$put_chars(scrn::help, "A Hole in the",13,42,,,,)
+call smg$put_chars(scrn::help, character.char(character.trap),14,5,,          &
+                   character.rend(character.trap),,)
+call smg$put_chars(scrn::help, "-- Trap Door (Danger)",14,7,,,,)
+call smg$put_chars(scrn::help, "mqqqj",14,36,,,,SMG$C_SPEC_GRAPHICS)
+call smg$put_chars(scrn::help, "wall is an exit",14,42,,,,)
+call smg$put_chars(scrn::help, character.char(character.key),15,5,,           &
+                   character.rend(character.key),,)
+call smg$put_chars(scrn::help, "-- Key, ",15,7,,,,)
+call smg$put_chars(scrn::help, character.char(character.door),15,17,,         &
+                   character.rend(character.door),,)
+call smg$put_chars(scrn::help, "-- Door",15,19,,,,)
+
+End Sub
+
+!_______________________________________________________________________________
+Sub mm.kill_screen
+option constant type=Integer
+
+! removed the screens
+! -------------------
+call smg$unpaste_virtual_display(scrn::main, scrn::pboard)   
+call smg$delete_virtual_display(scrn::main)
+call smg$unpaste_virtual_display(scrn::score, scrn::pboard)   
+call smg$delete_virtual_display(scrn::score)
+call smg$unpaste_virtual_display(scrn::msg, scrn::pboard)   
+call smg$delete_virtual_display(scrn::msg)
+call smg$unpaste_virtual_display(scrn::title, scrn::pboard)   
+call smg$delete_virtual_display(scrn::title)
+call smg$delete_virtual_display(scrn::help)
+call smg$delete_pasteboard(scrn::pboard)
+End Sub                                       
+
+!_______________________________________________________________________________
+Sub mm.load_map(long current_level)
+option constant type=Integer
+
+declare long i,j, string char, msg
+select current_level
+    case 5
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a"," "," ","x"," "," "," ","x"," "," "," ","x"," "," ","x"," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," ","x"," "," "," ","x"," "," ","x"," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," ","x"," "," "," ","x"," "," ","x"," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," ","m"," ","q","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," ","x"," "," "," ","x"," "," "," "," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," ","x"," "," "," ","x"," "," "," "," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," ","x"," "," "," ","x"," "," "," "," "," ","a","a"
+        data "a","a","q","q","n","q","q","q","n","q","q","q","u"," "," "," "," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," ","x"," "," "," ","x"," "," "," "," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," ","x"," "," "," ","x"," "," "," "," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," ","x"," "," "," ","x"," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        current_map::posy(character.n(character.man)) = 13
+        current_map::posx(character.n(character.man)) = 10
+        current_map::posy(character.n(character.mummy1)) = 3
+        current_map::posx(character.n(character.mummy1)) = 18
+        current_map::posy(character.n(character.mummy3)) = 11
+        current_map::posx(character.n(character.mummy3)) = 4
+        current_map::posy(character.n(character.trap)) = 9
+        current_map::posx(character.n(character.trap)) = 17
+        current_map::posy(character.n(character.exit)) = 2
+        current_map::posx(character.n(character.exit)) = 18
+        msg = "Welcome to the first level!"
+        call smg$put_chars(scrn::score, "1",7,18)
+        call smg$put_chars(scrn::score, "5",3,2,,SMG$M_USER8)
+    case 4
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a"," "," ","x"," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," ","x"," "," "," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," "," "," "," "," ","q","j"," "," "," "," ","a","a"
+        data "a","a","q","q","j"," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," ","l","q","q"," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," ","x"," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," ","m","q","q"," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," ","x"," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," ","m","q"," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        current_map::posy(character.n(character.man)) = 10
+        current_map::posx(character.n(character.man)) = 4
+        current_map::posy(character.n(character.mummy1)) = 3
+        current_map::posx(character.n(character.mummy1)) = 3
+        current_map::posy(character.n(character.mummy3)) = 0
+        current_map::posx(character.n(character.mummy3)) = 0
+        current_map::posy(character.n(character.exit)) = 2
+        current_map::posx(character.n(character.exit)) = 7
+        current_map::posy(character.n(character.trap)) = 9
+        current_map::posx(character.n(character.trap)) = 8
+        msg = "Phew, that was a close one, have a go at Level 4"
+        call smg$put_chars(scrn::score, "5",3,2)
+        call smg$put_chars(scrn::score, "4",4,6,,SMG$M_USER8)
+    case 3
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","x"," "," ","x"," "," "," ","x"," "," "," ","a","a"
+        data "a","a","a","a","a","l","q","u"," "," ","x"," "," "," ","x"," ","x"," ","a","a"
+        data "a","a","a","a","l","j"," ","x"," "," ","x"," "," "," "," "," "," "," ","a","a"
+        data "a","a","q","q","j"," "," ","x"," "," ","x"," ","x"," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," ","x"," ","x"," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," ","x"," ","x"," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," ","x"," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," ","x"," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," ","x"," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," ","l","q","u"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," ","x"," "," "," ","x"," ","x"," ","a","a"
+        data "a","a","q","q","k"," "," ","x"," "," ","x"," "," "," ","x"," ","x"," ","a","a"
+        data "a","a","a","a","m","k"," ","x"," "," ","x"," "," "," ","x"," "," "," ","a","a"
+        data "a","a","a","a","a","m","q","u"," "," ","x"," "," "," "," "," ","x"," ","a","a"
+        data "a","a","a","a","a","a","a","x"," "," "," "," "," "," ","x"," ","x"," ","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        current_map::posy(character.n(character.man)) = 11
+        current_map::posx(character.n(character.man)) = 9
+        current_map::posy(character.n(character.mummy1)) = 0
+        current_map::posx(character.n(character.mummy1)) = 0
+        current_map::posy(character.n(character.mummy3)) = 11
+        current_map::posx(character.n(character.mummy3)) = 3
+        current_map::posy(character.n(character.exit)) = 11
+        current_map::posx(character.n(character.exit)) = 19
+        current_map::posy(character.n(character.trap)) = 17
+        current_map::posx(character.n(character.trap)) = 15
+        current_map::posy(character.n(character.door)) = 3
+        current_map::posx(character.n(character.door)) = 17
+        current_map::posy(character.n(character.key)) = 16
+        current_map::posx(character.n(character.key)) = 10
+        msg = "Well done! Now have a go at Level 3, Watch out Two Mummy Attack"
+        call smg$put_chars(scrn::score, "4",4,6)
+        call smg$put_chars(scrn::score, "3",5,10,,SMG$M_USER8)
+    case 2
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," ","x"," "," "," "," "," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," ","m","k"," "," "," "," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," ","x"," ","q","j"," "," "," "," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," ","x"," "," "," "," "," "," "," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," ","x"," "," "," "," "," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," ","x"," "," "," "," "," ","q","q","q","j"," ","a","a"
+        data "a","a","q","q","q","q","q","j"," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," ","q","q","w","q","q","q","q"," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," ","x"," "," "," "," "," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," ","q","j"," "," "," "," "," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," ","l","k"," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," ","x","x"," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," ","x","x"," "," "," "," ","m","q","a","a"
+        data "a","a"," "," "," "," "," "," "," "," ","x","x"," "," "," "," "," "," ","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        current_map::posy(character.n(character.man)) = 6
+        current_map::posx(character.n(character.man)) = 14
+        current_map::posy(character.n(character.mummy1)) = 15
+        current_map::posx(character.n(character.mummy1)) = 18
+        current_map::posy(character.n(character.mummy2)) = 15
+        current_map::posx(character.n(character.mummy2)) = 15
+        current_map::posy(character.n(character.mummy3)) = 0
+        current_map::posx(character.n(character.mummy3)) = 0
+        current_map::posy(character.n(character.exit)) = 16
+        current_map::posx(character.n(character.exit)) = 19
+        current_map::posy(character.n(character.trap)) = 3
+        current_map::posx(character.n(character.trap)) = 9
+        current_map::posy(character.n(character.door)) = 0
+        current_map::posx(character.n(character.door)) = 0
+        current_map::posy(character.n(character.key)) = 0
+        current_map::posx(character.n(character.key)) = 0
+        msg = "You made it to level 2, only one more to go!"
+        call smg$put_chars(scrn::score, "3",5,10)
+        call smg$put_chars(scrn::score, "2",6,14,,SMG$M_USER8)
+    case 1
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a"," "," "," "," ","x"," "," "," "," "," ","x"," "," "," "," "," ","a","a"
+        data "a","a"," ","q","q","q","j"," "," "," "," "," ","m","q","q","q","q"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," ","l","q","q","q","q","q","k"," ","a","a"
+        data "a","a"," "," ","l","q","k"," "," "," ","x"," "," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," ","x"," ","x"," "," "," "," "," "," "," "," "," ","x"," ","a","a"
+        data "a","a"," "," ","x"," ","m","q"," "," "," "," ","q","q","q","q","j"," ","a","a"
+        data "a","a"," ","q","j"," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," ","q","q","q","q","a","a"
+        data "a","a"," ","a"," ","q","q","q","q"," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," ","l","q"," ","q","w","q","q"," ","a","a"
+        data "a","a"," ","x"," "," "," "," "," "," ","x"," "," "," ","x"," "," "," ","a","a"
+        data "a","a","q","v","q","q","q","q"," ","q","j"," "," "," ","x"," ","q","q","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," ","x"," "," "," ","a","a"
+        data "a","a"," ","q","q","q","q","q","q","q","q","q","q","q","v","q","q"," ","a","a"
+        data "a","a"," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," ","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        data "a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a","a"
+        current_map::posy(character.n(character.man)) = 18
+        current_map::posx(character.n(character.man)) = 13
+        current_map::posy(character.n(character.mummy1)) = 3
+        current_map::posx(character.n(character.mummy1)) = 14
+        current_map::posy(character.n(character.mummy2)) = 3
+        current_map::posx(character.n(character.mummy2)) = 6
+        current_map::posy(character.n(character.mummy3)) = 13
+        current_map::posx(character.n(character.mummy3)) = 3
+        current_map::posy(character.n(character.door)) = 4
+        current_map::posx(character.n(character.door)) = 18
+        current_map::posy(character.n(character.key)) = 14
+        current_map::posx(character.n(character.key)) = 13
+        current_map::posy(character.n(character.exit)) = 19
+        current_map::posx(character.n(character.exit)) = 11
+        current_map::posy(character.n(character.trap)) = 18
+        current_map::posx(character.n(character.trap)) = 12
+        msg = "The last and final level!!! Can you get out!"
+        call smg$put_chars(scrn::score, "2",6,14)
+        call smg$put_chars(scrn::score, "1",7,18,,SMG$M_USER8)
+end select
+
+!Clear main screen
+!-----------------
+call smg$erase_display(scrn::main)
+
+!Set read pointer
+!----------------
+for i = 1 to (max_map_x * max_map_y) * (5 - current_level)
+    read char
+next i
+
+!Draw current map to screen
+!--------------------------
+for i = 1 to max_map_y
+    for j = 1 to max_map_x
+        read char
+        current_map::grid(j,i) = char
+        call smg$put_chars(scrn::main,char,i,j,,,,SMG$C_SPEC_GRAPHICS)
+    next j
+next i
+
+!Place Special characters on screen.
+!-----------------------------------
+for i = 1 to character.nvals
+    if current_map::posx(i) <> 0 and current_map::posy(i) <> 0 then
+        call mm.display_char(character.fr_n(i))
+    end if
+
+next i
+
+!Set the Current Door position
+!-----------------------------
+init_door_y = current_map::posy(character.n(character.door)) 
+init_door_x = current_map::posx(character.n(character.door)) 
+
+!Display intro message
+!---------------------
+call smg$put_chars(scrn::msg, msg, 1,1, smg$m_erase_to_eol,)
+
+!Turn cursor off
+!---------------
+call smg$set_cursor_mode(scrn::pboard,SMG$M_CURSOR_OFF)
+
+End Sub
+
+end implementation
+end image
+
+#.LNK
+$! Output from FIX_LINK, 24-MAY-2002 15:25:29.29
+$ link sys$input:/option /exe=genbld:mummy_maze.exe 'P1'
+genbld:mummy_maze.obj, -
+genbld:mummy_maze.1obj, -
+decbld:sis_swnlib.olb/library
+$exit

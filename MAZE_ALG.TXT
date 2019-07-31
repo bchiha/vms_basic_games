@@ -1,0 +1,980 @@
+#---------------------------------
+#    M A Z E  A L G O R I T H M 
+#---------------------------------
+#.m
+!*******************************************************************************
+ Image alg, facility=maze, short_name=ma
+!-----------------------------------------
+%ab 
+    The Maze Algorithm, Creates a random maze and find the exit
+    (c) 2004 B. Chiha
+%end %ab
+%keywords algorithm,maze,game
+
+Interface
+
+CLD_syntax
+    define verb ma
+    image "genbld:maze_alg.exe"
+    qualifier columns, value(type=$number)
+    qualifier rows, value(type=$number)
+end CLD_syntax
+
+end interface
+Implementation
+
+Shared
+
+%include 'utebld:smg_stuff.bas'
+%include 'decbld:basdef'
+
+Record screen_ids
+    Long pboard    ! Pasteboard
+    Long main      ! Main Screen
+    Long menu      ! Menu Screen
+    Long title     ! Title Screen
+    Long help      ! Help Screen
+    Long msg       ! Message Bar
+    Long Kboard    ! Keyboard
+End Record
+
+!Menu Enumerator Type
+enum_type menu_opt
+    attributes
+         string label = 11   !label
+    end attributes
+	cell=1 ("Cellular")
+	rec    ("Recursive")
+	brute  ("Brute")
+        walk   ("Walkthrough")
+	new    ("New Maze")
+	help   ("Help")
+	exit   ("Exit")
+end enum_type
+
+!renditions are:
+!SMG$M_BOLD = 1
+!SMG$M_REVERSE = 2
+!SMG$M_BLINK = 4
+!SMG$M_UNDERLINE = 8
+!SMG$M_INVISIBLE = 16
+!SMG$M_USER1 = 256
+!SMG$M_USER2 = 512
+!SMG$M_USER3 = 1024
+!SMG$M_USER4 = 2048
+!SMG$M_USER5 = 4096
+!SMG$M_USER6 = 8192
+!SMG$M_USER7 = 16384
+!SMG$M_USER8 = 32768
+
+declare byte   Constant north = 1, east = 2, west = 3, south = 4
+declare long   Constant maxx = 20, maxy = 62
+Record maze_data
+    String grid(0 to maxx,0 to maxy) = 1
+End record
+
+!Record the sucessful moves to backtrack later
+Record move_char
+    long posx
+    long posy
+End Record
+    
+declare word constant max_stored_moves = 1023
+Record move_registar
+    word move_number
+    move_char moves(0 to max_stored_moves)
+End Record
+
+!Screen Titles
+declare string Constant game_title = "MAZE ALGORITHM", &
+                        main_win = "Maze", &
+                        help_win = "Maze Algoritym Help", &
+                        menu_win = "Menu"
+
+!Special Characters
+declare string Constant blank_char = ' '
+declare string Constant wall_char = '#'
+declare string Constant path_char = 'f'
+declare string Constant man_char = '@'
+
+
+!Global Variables -- Yuk
+map (ma_data) screen_ids scrn, quad initial_time, maze_data maze, o_maze, &
+              move_registar backtrack, byte path_found, word path_len, n_moves
+
+End Shared
+!_______________________________________________________________________________
+Program maze_algorithm
+option constant type=Integer, handle=severe
+
+declare word selection
+declare string msg
+!Use 2x + 2, so if 5x5 then 2*5+2 = 12
+declare long max_map_x, max_map_y
+
+! Get rows and colums if passed in otherwise use default
+!-------------------------------------------------------
+%include %procs %from 'rtlbld:cli_access'
+if cli.is_present('columns') then
+    max_map_y = integer(cli.value('columns'),long)
+    if max_map_y < 6 then
+        print "Columns must be greater then 5"
+        exit program
+    end if
+    max_map_y = maxy if max_map_y > maxy
+    max_map_y = max_map_y - 1 if mod(max_map_y,2) <> 0 
+else
+    max_map_y = maxy
+end if
+if cli.is_present('rows') then
+    max_map_x = integer(cli.value('rows'),long)
+    if max_map_x < 6 then
+        print "Rows must be greater then 5"
+        exit program
+    end if
+    max_map_x = maxx if max_map_x > maxx
+    max_map_x = max_map_x - 1 if mod(max_map_x,2) <> 0 
+else
+    max_map_x = maxx
+end if
+
+! Create Pasteboard and virtual displays
+! --------------------------------------
+call ma.init_screen
+
+! Create and Show initial map
+! ---------------------------
+call ma.create_maze(max_map_x,max_map_y)
+
+! Start the Clock off
+! -------------------
+external long ma.calc_time
+call sys$gettim(initial_time)
+call sys$dclast(ma.calc_time,,)
+
+! Create a keyboard and wait for a key to be pressed.  End Game if needed
+! Also handle the Delete key which undo's a move
+! -----------------------------------------------------------------------
+call smg$create_virtual_keyboard(scrn::kboard, "sys$input:")
+
+while selection <> menu_opt.n(menu_opt.exit)
+    msg = "Welcome to Brian's maze algorithms"
+    call smg$put_chars(scrn::msg, msg, 1,1, smg$m_erase_to_eol,)
+    call smg$select_from_menu(scrn::kboard, scrn::menu, selection, &
+                        !default_choice!, &
+                        !flags!, &
+                        !help lib!, &
+                        !time_out in sec!, &
+                        !terminator!, &
+                        !selected_item!, &
+                        !rend!smg$m_bold, &
+                        !rend-com!) 
+    select selection
+        case menu_opt.n(menu_opt.new)
+            call ma.create_maze(max_map_x,max_map_y)
+        case menu_opt.n(menu_opt.cell)
+            call ma.redraw_maze(max_map_x,max_map_y)
+            call ma.solve_maze_cellular(max_map_x,max_map_y)
+        case menu_opt.n(menu_opt.rec)
+            path_found = bas_c_false
+            call ma.redraw_maze(max_map_x,max_map_y)
+            call ma.reset_stats
+            n_moves = n_moves + 1
+            call ma.solve_maze_recursive(2,1,max_map_x,max_map_y)
+            call ma.display_stats
+        case menu_opt.n(menu_opt.brute)
+            call ma.redraw_maze(max_map_x,max_map_y)
+            call ma.solve_maze_brute(max_map_x,max_map_y)
+        case menu_opt.n(menu_opt.walk)
+            call ma.redraw_maze(max_map_x,max_map_y)
+            call ma.solve_maze_walk(max_map_x)
+            call ma.redraw_maze(max_map_x,max_map_y)
+        case menu_opt.n(menu_opt.help)
+            call ma.help
+    end select
+next
+
+! Remove Virtual Displays and delete it
+! -------------------------------------
+call ma.kill_screen
+call ma.display_credit 
+end program
+
+!_______________________________________________________________________________
+Sub ma.display_stats
+option constant type=Integer
+
+declare long effective
+
+!Put the algorythm stats to the screen
+!-------------------------------------
+call smg$put_chars(scrn::menu, format$(n_moves,'<%>##'), 17, 12, smg$m_erase_to_eol,)
+if path_len = 0 then
+    call smg$put_chars(scrn::menu, 'N/A ', 18, 12, smg$m_erase_to_eol,)
+    call smg$put_chars(scrn::menu, ' N/A', 19, 11, smg$m_erase_to_eol,)
+else
+    effective = (path_len * 100) / n_moves
+    call smg$put_chars(scrn::menu, format$(path_len,'<%>##'), 18, 12, smg$m_erase_to_eol,)
+    call smg$put_chars(scrn::menu, format$(effective/100.0,'<0>.##'), 19,11, smg$m_erase_to_eol,)
+end if
+
+End sub
+!_______________________________________________________________________________
+Sub ma.reset_stats
+option constant type=Integer
+
+!Reset algorythm stats
+!---------------------
+path_len = 0
+n_moves = 0
+
+End sub
+!_______________________________________________________________________________
+Sub ma.help
+option constant type=Integer
+
+! Acivate Help Screen
+!--------------------
+declare word key_hit
+call smg$paste_virtual_display(scrn::help, scrn::pboard, 5, 10)
+call smg$read_keystroke(scrn::kboard, key_hit,,,)   
+call smg$unpaste_virtual_display(scrn::help, scrn::pboard)   
+End Sub
+!_______________________________________________________________________________
+Sub ma.calc_time(long para1,R0,R1,PC,PSL)
+option constant type=Integer, type=Integer
+
+!Asynchronous routine executed every second to display timer
+!-----------------------------------------------------------
+external long ma.calc_time
+declare quad current_time, daytim, string diff_time
+
+call sys$gettim(current_time)
+diff_time = space$(23)
+call sys$asctim(, diff_time, current_time-initial_time,) 
+call smg$put_chars(scrn::menu, seg$(diff_time,16,20), 13, 8)
+diff_time = "0 ::01.00"                     !redo every second
+call SYS$BINTIM(diff_time, daytim)
+call SYS$SETIMR(,daytim, ma.calc_time,0,0)  !resubmit module
+
+End sub
+!_______________________________________________________________________________
+Sub ma.display_credit
+option constant type=Integer, handle=severe
+
+! Display closing message when quitting
+!--------------------------------------
+
+external Long function ots$cvt_tz_l(String !hex_str!, Long !val!, &
+    Long by value !val_size!)
+declare long z,bina,i
+declare string hex
+
+data "16","00","09","09","09","09","09","42","72","6F","75","67","68","74","20","74"
+data "6F","20","79","6F","75","20","62","79","0D","0A","09","09","09","09","09","53"
+data "4C","41","52","54","49","42","41","52","54","46","41","53","54","20","49","4E"
+data "43","2E","0D","0A","0D","0A","20","5F","5F","5F","5F","20","20","20","20","20"
+data "20","20","20","20","20","20","20","20","5F","5F","5F","5F","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","20","20","20","7C","2B","2B","2B"
+data "2B","2B","7C","0D","0A","00","7C","2B","2B","2B","2B","7C","20","20","20","20"
+data "5F","5F","5F","20","20","20","20","7C","2B","2B","2B","2B","7C","20","20","20"
+data "20","20","20","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "20","20","20","20","5F","5F","5F","5F","20","20","20","20","7C","2B","2B","2B"
+data "2B","2B","7C","0D","0A","00","7C","2B","2B","2B","2B","7C","20","20","20","7C"
+data "2B","2B","20","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F"
+data "5F","5F","5F","5F","5F","5F","5F","5F","5F","20","20","20","20","20","20","20"
+data "20","20","20","7C","2B","2B","2B","2B","7C","20","20","20","7C","2B","2B","2B"
+data "2B","2B","7C","0D","0A","00","7C","2B","2B","2B","2B","7C","20","20","20","7C"
+data "2B","2B","2F","20","20","20","20","20","20","2F","28","20","29","5C","20","20"
+data "20","20","20","20","20","20","20","20","20","5C","20","20","20","20","20","20"
+data "20","20","20","7C","2B","2B","2B","2B","7C","20","20","20","7C","2B","2B","2B"
+data "2B","2B","7C","20","20","20","5F","5F","0D","0A","7C","20","20","20","20","7C"
+data "20","20","20","7C","2B","7C","20","20","20","20","20","20","7C","2D","6F","6F"
+data "20","2D","7C","20","20","20","20","20","20","20","20","20","20","20","5C","5F"
+data "5F","5F","5F","5F","5F","20","20","7C","2B","2B","2B","2B","7C","20","20","20"
+data "7C","2B","2B","2B","2B","2B","7C","20","20","7C","2B","2B","7C","0D","0A","00"
+data "2D","2D","2D","2D","2D","28","5F","5F","29","2D","2D","7C","20","20","20","20"
+data "20","20","20","5C","5F","5F","5C","2F","20","20","20","20","20","20","20","20"
+data "20","20","20","5F","28","5F","5F","29","5F","20","20","5C","20","2D","2D","2D"
+data "2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D"
+data "2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","0D"
+data "0A","00","20","6F","20","20","20","28","20","6F","6F","20","20","2F","5F","5F"
+data "5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F"
+data "5F","5F","5F","5F","5F","7C","28","6F","6F","29","20","20","5C","20","7C","20"
+data "20","20","20","20","20","20","20","20","5F","5F","0D","0A","20","7C","20","20"
+data "5F","2F","5C","5F","7C","20","7C","20","20","4D","20","4F","20","4F","20","2D"
+data "20","42","20","55","20","53","20","54","20","45","20","52","20","53","7C","5F"
+data "5F","5C","2F","5C","20","2F","7C","20","7C","20","20","20","20","20","20","20"
+data "20","2F","6F","6F","7C","20","2D","20","42","6C","65","61","75","72","67","68"
+data "21","0D","0A","00","20","7C","2D","7C","20","20","5C","5C","5F","5F","5F","5F"
+data "20","20","20","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","2D","2D","2D","2D","2D","2D","20"
+data "20","29","5F","20","20","20","20","2F","7C","20","20","2F","5C","0D","0A","00"
+data "20","20","2D","7C","5F","20","20","5C","5F","7C","2D","5F","7C","5E","5E","5E"
+data "5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E","5E"
+data "5E","5E","5E","5E","5E","5E","5E","20","30","20","20","20","20","20","5F","7C"
+data "20","20","2A","20","20","5C","2F","20","20","2A","0D","0A","20","20","20","20"
+data "20","5C","20","20","7C","20","20","5F","5F","5F","5F","5F","5F","5F","5F","5F"
+data "5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F","5F"
+data "5F","5F","5F","5F","5F","5F","5F","5F","5F","2F","0D","0A","20","20","20","20"
+data "20","7C","20","20","57","7C","20","20","5C","20","5C","5F","2F","20","2F","2D"
+data "2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D","2D"
+data "20","5C","20","5C","5F","2F","20","2F","0D","0A","20","20","20","20","20","2F"
+data "20","2F","5C","20","5C","20","20","5C","5F","5F","5F","2F","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "5C","5F","5F","5F","2F","0D","0A","00","20","20","20","20","2F","20","2F","20"
+data "20","5C","20","5C","0D","0A","20","20","20","20","5E","5E","5E","20","20","20"
+data "5E","5E","5E","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","20","20","20","20","20","20","20"
+data "20","20","20","20","20","20","20","20","20","57","68","6F","20","79","6F","75"
+data "20","67","6F","6E","6E","61","20","63","61","6C","6C","2E","2E","2E","3F","00"
+
+for i = 1 to 16*59 
+    read hex
+    z = ots$cvt_tz_l(hex, bina, 4)
+    print string$(1,bina);
+next i
+
+End sub
+
+!_______________________________________________________________________________
+Sub ma.init_screen
+option constant type=Integer
+
+! Create and paste screens
+!------------------------- 
+declare Long rows, cols
+declare Byte i
+map (menu_opts) string choices(1 to maze_menu_opt_exit)=11
+
+for i = lbound(choices) to ubound(choices)
+    choices(i) = menu_opt.label(menu_opt.fr_v(i))
+next i
+
+call smg$create_pasteboard(scrn::pboard,, rows, cols)
+call smg$create_virtual_display(1, cols, scrn::title)
+call smg$create_virtual_display(16,61, scrn::help, smg$m_block_border)
+call smg$label_border(scrn::help, help_win,,,smg$m_bold or smg$m_user5)
+call smg$create_virtual_display(20,61, scrn::main, smg$m_border)
+call smg$label_border(scrn::main, main_win,,,smg$m_bold)
+call smg$create_virtual_display(20,15, scrn::menu, smg$m_border)
+call smg$label_border(scrn::menu, menu_win,,,smg$m_bold)
+call smg$create_virtual_display(1, cols, scrn::msg)
+call smg$paste_virtual_display(scrn::title, scrn::pboard, 1, 1)
+call smg$paste_virtual_display(scrn::main, scrn::pboard, 3, 2)
+call smg$paste_virtual_display(scrn::menu, scrn::pboard, 3, cols-16)
+call smg$paste_virtual_display(scrn::msg, scrn::pboard, 24, 1)
+call smg$create_menu(scrn::menu, choices(), smg$k_vertical, &
+                     smg$m_wrap_menu, 5,)
+
+! Fill out screens with useful information
+!-----------------------------------------
+call smg$put_chars_wide(scrn::title, game_title,1,cols/2 - len(game_title),  &
+                                        SMG$M_BOLD or SMG$M_REVERSE)
+call smg$put_chars(scrn::menu, "Choose solver",1,2,,SMG$M_BOLD)
+call smg$put_chars(scrn::menu, "algorythm",2,2,,SMG$M_BOLD)
+call smg$put_chars(scrn::menu, "from menu",3,2,,SMG$M_BOLD)
+call smg$put_chars(scrn::menu, "Time:",13,2,,)
+call smg$put_chars(scrn::menu, "Statistics",15,2,,)
+call smg$put_chars(scrn::menu, "----------",16,2,,SMG$M_BOLD)
+call smg$put_chars(scrn::menu, "Moves",17,2,,)
+call smg$put_chars(scrn::menu, "Opt Path",18,2,,)
+call smg$put_chars(scrn::menu, "Effect  %",19,2,,)
+
+call smg$put_chars(scrn::help, "This program generates and solves a two dimention maze.  ",2,3,,)
+call smg$put_chars(scrn::help, "The maze is generated using a method that makes a path if",3,3,,)
+call smg$put_chars(scrn::help, "posible otherwise choose a diferent direction to make a  ",4,3,,)
+call smg$put_chars(scrn::help, "path.  It does this until no more paths can be make.     ",5,3,,)
+call smg$put_chars(scrn::help, "There are four methods given that can solve the maze...  ",6,3,,)
+call smg$put_chars(scrn::help, "Cellular",8,3,,SMG$M_USER3)
+call smg$put_chars(scrn::help, "-- Look at every square, if only one exit exists",8,12,,)
+call smg$put_chars(scrn::help, "then mark as a dead end.  Only one 2 way path",9,15,,)
+call smg$put_chars(scrn::help, "will remain.                                 ",10,15,,)
+call smg$put_chars(scrn::help, "Recursive",11,3,,SMG$M_USER3)
+call smg$put_chars(scrn::help, "-- At the current square go down every path,   ",11,13,,)
+call smg$put_chars(scrn::help, "keep doing this until end point is found.   ",12,16,,)
+call smg$put_chars(scrn::help, "path will be shown by the sucessful routine.",13,16,,)
+call smg$put_chars(scrn::help, "Brute",14,3,,SMG$M_USER3)
+call smg$put_chars(scrn::help, "-- Always turn left until exit is found.",14,9,,)
+call smg$put_chars(scrn::help, "Walk Through",15,3,,SMG$M_USER3)
+call smg$put_chars(scrn::help, "-- Find your own way out!",15,16,,)
+
+End Sub
+
+!_______________________________________________________________________________
+Sub ma.kill_screen
+option constant type=Integer
+
+! removed the screens
+! -------------------
+call smg$unpaste_virtual_display(scrn::main, scrn::pboard)   
+call smg$delete_virtual_display(scrn::main)
+call smg$unpaste_virtual_display(scrn::menu, scrn::pboard)   
+call smg$delete_virtual_display(scrn::menu)
+call smg$unpaste_virtual_display(scrn::msg, scrn::pboard)   
+call smg$delete_virtual_display(scrn::msg)
+call smg$unpaste_virtual_display(scrn::title, scrn::pboard)   
+call smg$delete_virtual_display(scrn::title)
+call smg$delete_virtual_display(scrn::help)
+call smg$delete_pasteboard(scrn::pboard)
+End Sub                                       
+
+!_______________________________________________________________________________
+Function byte ma.exit_count(long curr_x, long curr_y)
+option constant type=Integer
+
+declare byte result
+result = 0
+
+if maze::grid(curr_x,curr_y) <> blank_char then
+    result = 4  !All walls
+    exit function result
+end if
+
+result = result + 1 if maze::grid(curr_x-1,curr_y) = blank_char
+result = result + 1 if maze::grid(curr_x+1,curr_y) = blank_char
+result = result + 1 if maze::grid(curr_x,curr_y-1) = blank_char
+result = result + 1 if maze::grid(curr_x,curr_y+1) = blank_char
+
+End Function result
+!_______________________________________________________________________________
+Sub ma.go_to_exit(long curr_x, long curr_y)
+option constant type=Integer
+
+exit sub if maze::grid(curr_x,curr_y) <> blank_char
+
+select bas_c_true
+    case maze::grid(curr_x - 1, curr_y) = blank_char
+        curr_x = curr_x - 1
+    case maze::grid(curr_x + 1, curr_y) = blank_char
+        curr_x = curr_x + 1
+    case maze::grid(curr_x, curr_y - 1) = blank_char
+        curr_y = curr_y - 1
+    case maze::grid(curr_x, curr_y + 1) = blank_char
+        curr_y = curr_y + 1
+    case else
+end select
+
+End Sub
+!_______________________________________________________________________________
+Sub ma.solve_maze_cellular(long max_map_x, long max_map_y)
+option constant type=Integer
+
+external byte function ma.exit_count(long,long)
+external sub ma.go_to_exit(long,long)
+declare long walk_y, walk_x, exit_y, exit_x, curr_y, curr_x 
+
+call ma.reset_stats
+
+!look at every grid point and find a dead end. Then recursivley back track
+!from there until more that one exit is shown.  When a dead end is found mark
+!it as a wall.  Only one path will be show as it always has two exits
+!----------------------------------------------------------------------------
+
+for curr_x = 1 to max_map_x - 1
+    for curr_y = 1 to max_map_y - 1
+        walk_x = curr_x  
+        walk_y = curr_y
+        while ma.exit_count(walk_x,walk_y) <= 1 
+            exit_x = walk_x
+            exit_y = walk_y
+            call ma.go_to_exit(exit_x,exit_y)
+            maze::grid(walk_x,walk_y) = path_char
+            call smg$put_chars(scrn::main,maze::grid(walk_x,walk_y),&
+                               walk_x,walk_y,,,,SMG$C_SPEC_GRAPHICS)
+            n_moves = n_moves + 1
+            walk_x = exit_x
+            walk_y = exit_y
+        next
+    next curr_y
+next curr_x
+
+!Now find the blank_char (non walls) and create a line following it
+!------------------------------------------------------------------
+curr_x = 2  ! Door location (always the same)
+curr_y = 1
+call smg$put_chars(scrn::main,path_char,curr_x,curr_y,,&
+                   SMG$M_USER6 or SMG$M_BOLD,,SMG$C_SPEC_GRAPHICS)
+maze::grid(curr_x,curr_y) = path_char
+path_len = path_len + 1
+
+while curr_x <> max_map_x - 1 and (curr_y <> 1 or curr_x = 2) and curr_x <> 1
+    select bas_c_true
+        case maze::grid(curr_x + 1, curr_y) = blank_char
+                 curr_x = curr_x + 1
+        case maze::grid(curr_x - 1, curr_y) = blank_char
+                 curr_x = curr_x - 1
+        case maze::grid(curr_x, curr_y + 1) = blank_char
+                 curr_y = curr_y + 1
+        case maze::grid(curr_x, curr_y - 1) = blank_char
+                 curr_y = curr_y - 1
+        case else
+    end select
+    call smg$put_chars(scrn::main,path_char,curr_x,curr_y,,&
+                       SMG$M_USER6 or SMG$M_BOLD,,SMG$C_SPEC_GRAPHICS)
+    maze::grid(curr_x,curr_y) = path_char
+    path_len = path_len + 1
+next
+
+n_moves = n_moves + path_len
+call ma.display_stats
+End Sub
+!_______________________________________________________________________________
+Sub ma.solve_maze_recursive(long curr_x, long curr_y, long max_map_x, &
+                            long max_map_y)
+option constant type=Integer
+
+!Recursively head down in one direction, if a wall is found try another
+!direction.  If no more moves then exit function.  When the end point is found
+!recursively exit the function marking where you have been.  This will be 
+!the path
+
+maze::grid(curr_x,curr_y) = path_char
+call smg$put_chars(scrn::main,path_char,curr_x,curr_y,,,,SMG$C_SPEC_GRAPHICS)
+
+path_found = bas_c_true if curr_x = max_map_x - 1 or &
+                           (curr_y = 1 and curr_x <> 2) or curr_x = 1
+
+if not path_found and maze::grid(curr_x-1,curr_y) = blank_char then
+    call ma.solve_maze_recursive(curr_x-1, curr_y, max_map_x, max_map_y)
+    n_moves = n_moves + 1
+end if
+
+if not path_found and maze::grid(curr_x+1,curr_y) = blank_char then
+    call ma.solve_maze_recursive(curr_x+1, curr_y, max_map_x, max_map_y)
+    n_moves = n_moves + 1
+end if
+
+if not path_found and maze::grid(curr_x,curr_y-1) = blank_char and &
+   curr_y-1 <> 0 then  !To stop going through the start door
+    call ma.solve_maze_recursive(curr_x, curr_y-1, max_map_x, max_map_y)
+    n_moves = n_moves + 1
+end if
+
+if not path_found and maze::grid(curr_x,curr_y+1) = blank_char then
+    call ma.solve_maze_recursive(curr_x, curr_y+1, max_map_x, max_map_y)
+    n_moves = n_moves + 1
+end if
+
+if path_found then
+    call smg$put_chars(scrn::main,path_char,curr_x,curr_y,,&
+                       SMG$M_USER6 or SMG$M_BOLD,,SMG$C_SPEC_GRAPHICS)
+    path_len = path_len + 1
+end if
+
+End Sub
+!_______________________________________________________________________________
+Function byte ma.free_space_ahead(byte facing_direction, curr_x, curr_y)
+option constant type=Integer
+
+declare byte result
+
+result = bas_c_false
+select facing_direction
+    case north
+        result = bas_c_true if maze::grid(curr_x-1,curr_y) = blank_char
+    case south
+        result = bas_c_true if maze::grid(curr_x+1,curr_y) = blank_char
+    case east
+        result = bas_c_true if maze::grid(curr_x,curr_y+1) = blank_char
+    case west
+        result = bas_c_true if maze::grid(curr_x,curr_y-1) = blank_char
+end select
+
+End Function result
+!_______________________________________________________________________________
+Function byte ma.gap_on_left(byte facing_direction, curr_x, curr_y)
+option constant type=Integer
+
+declare byte result
+
+result = bas_c_false
+select facing_direction
+    case north
+        result = bas_c_true if maze::grid(curr_x,curr_y-1) = blank_char
+    case south
+        result = bas_c_true if maze::grid(curr_x,curr_y+1) = blank_char
+    case east
+        result = bas_c_true if maze::grid(curr_x-1,curr_y) = blank_char
+    case west
+        result = bas_c_true if maze::grid(curr_x+1,curr_y) = blank_char
+end select
+
+End Function result
+!_______________________________________________________________________________
+Sub ma.move_one_forward(byte facing_direction, long curr_x, curr_y)
+option constant type=Integer
+
+select facing_direction
+    case north
+        curr_x = curr_x - 1
+    case south
+        curr_x = curr_x + 1
+    case east
+        curr_y = curr_y + 1
+    case west
+        curr_y = curr_y - 1
+end select
+
+End Sub
+!_______________________________________________________________________________
+Sub ma.turn_person(byte facing_direction, byte turn_left)
+option constant type=Integer
+
+if turn_left then
+    select facing_direction
+        case north
+            facing_direction = west
+        case west
+            facing_direction = south
+        case south
+            facing_direction = east
+        case east
+            facing_direction = north
+    end select
+else
+    select facing_direction
+        case north
+            facing_direction = east
+        case west
+            facing_direction = north
+        case south
+            facing_direction = west
+        case east
+            facing_direction = south
+    end select
+end if
+End Sub
+!_______________________________________________________________________________
+Sub ma.solve_maze_brute(long max_map_x, long max_map_y)
+option constant type=Integer
+
+external byte function ma.free_space_ahead(byte,long,long)
+external byte function ma.gap_on_left(byte,long,long)
+external sub ma.turn_person(byte,byte)
+external sub ma.move_one_forward(byte,long,long)
+
+declare byte constant north=1, east=2, west=3, south=4
+declare long curr_x, curr_y
+declare byte facing_direction
+declare word curr_path_len
+
+curr_path_len = path_len
+call ma.reset_stats
+path_len = curr_path_len
+n_moves = n_moves + 1
+
+!Bastically this will keep going forward if it can, otherwise it will turn
+!left.  Keep doing this until you have found the way out.  This method only
+!works if no island are present in the maze
+
+curr_x = 2  ! Door location (always the same)
+curr_y = 1
+
+facing_direction = east  ! coming in from the left
+while curr_x <> max_map_x - 1 and (curr_y <> 1 or curr_x = 2) and curr_x <> 1
+    if ma.free_space_ahead(facing_direction, curr_x, curr_y) then
+        call ma.move_one_forward(facing_direction, curr_x, curr_y)
+        call smg$put_chars(scrn::main,path_char,curr_x,curr_y,,,,SMG$C_SPEC_GRAPHICS)
+        call ma.turn_person(facing_direction, bas_c_true) &
+                  if ma.gap_on_left(facing_direction, curr_x, curr_y)
+        n_moves = n_moves + 1
+    else 
+        call ma.turn_person(facing_direction, bas_c_false)
+    end if
+next
+
+call ma.display_stats
+End Sub
+!_______________________________________________________________________________
+Sub ma.solve_maze_walk(long max_map_x)
+option constant type=Integer
+
+declare long curr_x, curr_y
+declare word key_hit
+declare byte end_maze
+declare string msg
+
+call ma.reset_stats
+
+msg = "Try to find the way out!   Press 'Q' to quit"
+call smg$put_chars(scrn::msg, msg, 1,1, smg$m_erase_to_eol,)
+
+!place man at start door location
+!--------------------------------
+curr_x = 2  ! Door location (always the same)
+curr_y = 1
+call smg$put_chars(scrn::main,man_char,curr_x,curr_y,,SMG$M_BOLD,,)
+
+!Ask for user input, then move character if a space is found in the direction
+!of the input
+!-----------------
+end_maze = bas_c_false
+while key_hit <> SMG$K_TRM_UPPERCASE_Q and &
+      key_hit <> SMG$K_TRM_LOWERCASE_Q and &
+      not end_maze
+    call smg$read_keystroke(scrn::kboard, key_hit,,,)       
+    call smg$put_chars(scrn::main,blank_char,curr_x,curr_y,,SMG$M_BOLD,,)
+    select bas_c_true
+        case key_hit = SMG$K_TRM_LEFT
+            if maze::grid(curr_x,curr_y-1) = blank_char then
+                curr_y = curr_y - 1 
+                n_moves = n_moves + 1
+            end if
+        case key_hit = SMG$K_TRM_RIGHT
+            if maze::grid(curr_x,curr_y+1) = blank_char then
+                curr_y = curr_y + 1 
+                n_moves = n_moves + 1
+            end if
+        case key_hit = SMG$K_TRM_UP
+            if maze::grid(curr_x-1,curr_y) = blank_char then
+                curr_x = curr_x - 1 
+                n_moves = n_moves + 1
+            end if
+        case key_hit = SMG$K_TRM_DOWN
+            if maze::grid(curr_x+1,curr_y) = blank_char then
+                curr_x = curr_x + 1 
+                n_moves = n_moves + 1
+            end if
+    end select
+    !stop from going back out via the start door
+    curr_y = 1 if curr_x = 2 and curr_y = 0
+    call smg$put_chars(scrn::main,man_char,curr_x,curr_y,,SMG$M_BOLD,,)
+    call ma.display_stats
+    !Exit if end of maze found
+    end_maze = bas_c_true if curr_x = max_map_x or &
+                           (curr_y = 1 and curr_x <> 2) or curr_x = 1
+next
+
+!Bring up exit message
+if end_maze then
+    msg = "Well done, you have found the exit! Press any key to exit"
+else
+    msg = "Press any key to exit"
+end if
+call smg$put_chars(scrn::msg, msg, 1,1, smg$m_erase_to_eol,)
+call smg$read_keystroke(scrn::kboard, key_hit,,,)       
+
+End Sub
+!_______________________________________________________________________________
+Sub ma.redraw_maze(long max_map_x, long max_map_y)
+option constant type=Integer
+
+declare long i, j
+!Redraw Maze
+!-----------
+for i = 0 to max_map_x
+    for j = 0 to max_map_y
+        call smg$put_chars(scrn::main,o_maze::grid(i,j),i,j,,,,&
+                           SMG$C_SPEC_GRAPHICS)
+    next j
+next i
+maze = o_maze
+
+End Sub
+!_______________________________________________________________________________
+Sub ma.create_maze(long max_map_x, long max_map_y)
+option constant type=Integer
+
+declare long i, j, curr_x, curr_y, next_x, next_y, point_number, mid_point
+declare string char, msg
+declare byte valid_point, north_w, south_w, east_w, west_w, gap_found
+declare real rnd_no
+!Clear main screen
+!-----------------
+call smg$erase_display(scrn::main)
+
+call ma.reset_stats
+
+!Initialise maze with blank border
+!---------------------------------
+for i = 0 to max_map_x
+    for j = 0 to max_map_y
+        if (i = 0 or i = max_map_x) or (j = 0 or j = max_map_y) then
+            maze::grid(i,j) = blank_char
+        else
+            maze::grid(i,j) = wall_char
+        end if
+    next j
+next i
+
+!Make Maze
+!Draw a clear path.  If no where to go then backtrack to find the next 
+!available space.  
+!----------------------------------------------------------------------
+random
+curr_x = 2
+curr_y = 2
+point_number = 1
+backtrack::moves(point_number)::posx = curr_x
+backtrack::moves(point_number)::posy = curr_y
+
+maze::grid(curr_x,curr_y) = blank_char
+until point_number = 0
+    valid_point = bas_c_false
+    while not valid_point   !Find a valid point which is on the map and not
+        rnd_no = rnd        !the previous point
+        select bas_c_true
+            case rnd_no < 0.25
+                next_x = curr_x - 2
+                if next_x <> 0 and next_x <> max_map_x+1 and &
+                   next_x <> backtrack::moves(point_number-1)::posx then
+                    valid_point = bas_c_true
+                    curr_x = next_x
+                end if
+            case rnd_no >= 0.25 and rnd_no < 0.5
+                next_x = curr_x + 2
+                if next_x <> 0 and next_x <> max_map_x+1 and &
+                   next_x <> backtrack::moves(point_number-1)::posx then
+                    valid_point = bas_c_true
+                    curr_x = next_x
+                end if
+            case rnd_no >= 0.5 and rnd_no < 0.75
+                next_y = curr_y - 2
+                if next_y <> 0 and next_y <> max_map_y+1 and &
+                   next_y <> backtrack::moves(point_number-1)::posy then
+                    valid_point = bas_c_true
+                    curr_y = next_y
+                end if
+            case rnd_no >= 0.75
+                next_y = curr_y + 2
+                if next_y <> 0 and next_y <> max_map_y+1 and &
+                   next_y <> backtrack::moves(point_number-1)::posy then
+                    valid_point = bas_c_true
+                    curr_y = next_y
+                end if
+        end select
+    next
+    !If point is non blank then make a blank line between the two points
+    !Otherwise roll back to the previous point and start again.
+    if maze::grid(curr_x,curr_y) = wall_char then
+        maze::grid(curr_x,curr_y) = blank_char
+        mid_point = curr_x - backtrack::moves(point_number)::posx
+        select bas_c_true
+            case mid_point = -2
+                maze::grid(curr_x+1,curr_y) = blank_char
+            case mid_point = 2
+                maze::grid(curr_x-1,curr_y) = blank_char
+            case else
+        end select
+        mid_point = curr_y - backtrack::moves(point_number)::posy
+        select bas_c_true
+            case mid_point = -2
+                maze::grid(curr_x,curr_y+1) = blank_char
+            case mid_point = 2
+                maze::grid(curr_x,curr_y-1) = blank_char
+            case else
+        end select
+        point_number = point_number + 1
+        backtrack::moves(point_number)::posx = curr_x
+        backtrack::moves(point_number)::posy = curr_y
+    else  !Backtrack to the last point reached.
+        point_number = point_number - 1    
+        curr_x = backtrack::moves(point_number)::posx
+        curr_y = backtrack::moves(point_number)::posy
+    end if
+next
+
+!Convert the maze to use SMG$C_SPEC_GRAPHICS
+!-------------------------------------------
+for i = 0 to max_map_x
+    for j = 0 to max_map_y
+        north_w = bas_c_false    
+        south_w = bas_c_false    
+        east_w = bas_c_false    
+        west_w = bas_c_false 
+        if maze::grid(i,j) = wall_char then
+            north_w = bas_c_true if maze::grid(i-1,j) <> blank_char
+            south_w = bas_c_true if maze::grid(i+1,j) <> blank_char
+            east_w = bas_c_true if maze::grid(i,j+1) <> blank_char
+            west_w = bas_c_true if maze::grid(i,j-1) <> blank_char
+        end if
+        maze::grid(i,j) = 'j' if north_w and not south_w and not east_w and west_w
+        maze::grid(i,j) = 'k' if not north_w and south_w and not east_w and west_w
+        maze::grid(i,j) = 'l' if not north_w and south_w and east_w and not west_w
+        maze::grid(i,j) = 'm' if north_w and not south_w and east_w and not west_w
+        maze::grid(i,j) = 'n' if north_w and south_w and east_w and west_w
+        maze::grid(i,j) = 'q' if not north_w and not south_w and east_w and west_w
+        maze::grid(i,j) = 'q' if not north_w and not south_w and not east_w and west_w
+        maze::grid(i,j) = 'q' if not north_w and not south_w and east_w and not west_w
+        maze::grid(i,j) = 't' if north_w and south_w and east_w and not west_w
+        maze::grid(i,j) = 'u' if north_w and south_w and not east_w and west_w
+        maze::grid(i,j) = 'v' if north_w and not south_w and east_w and west_w
+        maze::grid(i,j) = 'w' if not north_w and south_w and east_w and west_w
+        maze::grid(i,j) = 'x' if north_w and south_w and not east_w and not west_w
+        maze::grid(i,j) = 'x' if north_w and not south_w and not east_w and not west_w
+        maze::grid(i,j) = 'x' if not north_w and south_w and not east_w and not west_w
+    next j
+next i      
+
+!Put Doors on Maze
+!-----------------
+!(2,1) is always there, but exit wall must be found.  Try first available gap
+!on right bottom side then work the way around to (2,2)
+maze::grid(2,1) = blank_char
+gap_found = bas_c_false
+i=max_map_x-1
+j=max_map_y-1
+until gap_found or j = 1
+    if maze::grid(i-1,j) = blank_char then
+        gap_found=bas_c_true
+        maze::grid(i,j) = blank_char
+    end if
+    j = j - 1
+next
+if not gap_found then
+    j=1
+    i=max_map_x-1
+    until gap_found or i = 1
+        if maze::grid(i,j+1) = blank_char then
+            gap_found=bas_c_true
+            maze::grid(i,j) = blank_char
+        end if
+        i = i - 1
+    next
+    if i = 1 then
+        gap_found = bas_c_false   !Must find an exit on (1,2)
+        j=max_map_y-1
+        until gap_found
+            if maze::grid(i+1,j) = blank_char then
+                gap_found=bas_c_true
+                maze::grid(i,j) = blank_char
+            end if
+            j = j - 1
+        next
+    end if
+end if
+
+o_maze = maze
+
+!Display Maze
+!------------
+for i = 0 to max_map_x
+    for j = 0 to max_map_y
+        call smg$put_chars(scrn::main,maze::grid(i,j),i,j,,,,&
+                           SMG$C_SPEC_GRAPHICS)
+    next j
+next i
+
+!Display intro message
+!---------------------
+msg = "Welcome to Brian's maze algorithms"
+call smg$put_chars(scrn::msg, msg, 1,1, smg$m_erase_to_eol,)
+
+!Turn cursor off
+!---------------
+call smg$set_cursor_mode(scrn::pboard,SMG$M_CURSOR_OFF)
+
+End Sub
+
+end implementation
+end image
+
+#.LNK
+$! Output from FIX_LINK, 24-FEB-2004 12:43:34.57
+$ link sys$input:/option /exe=genbld:maze_alg.exe 'P1'
+genbld:maze_alg.obj, -
+genbld:maze_alg.1obj, -
+decbld:sis_swnlib.olb/library
+$exit
